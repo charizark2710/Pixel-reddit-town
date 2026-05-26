@@ -69,3 +69,10 @@ export type WorldPostDetailResponse = {
   post: WorldPost;
   comments: PostComment[];
 };
+
+export type SubredditPostsResponse = {
+  type: 'subredditPosts';
+  subredditName: string;
+  posts: WorldPost[];
+  nextAfter: string | null;
+};

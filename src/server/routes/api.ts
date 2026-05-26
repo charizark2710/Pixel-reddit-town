@@ -5,6 +5,7 @@ import type {
   IncrementResponse,
   InitResponse,
   BuildingTier,
+  SubredditPostsResponse,
   TownTier,
   WorldPostDetailResponse,
   WorldPost,
@@ -120,9 +121,14 @@ const uniquePosts = (posts: WorldPost[]) => {
   return unique;
 };
 
-const getHotPostsFromSubreddit = async (subredditName: string, limit = 10) => {
+const getHotPostsFromSubreddit = async (
+  subredditName: string,
+  limit = 15,
+  after?: string
+) => {
   try {
     const listing = reddit.getHotPosts({
+      after,
       subredditName,
       limit,
       pageSize: limit,
@@ -139,7 +145,7 @@ const getFeedPosts = async () => {
   const posts: WorldPost[] = [];
 
   try {
-    const listing = reddit.getBestPosts({ limit: 40, pageSize: 40 });
+    const listing = reddit.getBestPosts({ limit: 45, pageSize: 45 });
     const bestPosts = await listing.all();
     posts.push(...bestPosts.map(toWorldPost));
   } catch (error) {
@@ -148,13 +154,13 @@ const getFeedPosts = async () => {
 
   try {
     const currentSubreddit = await reddit.getCurrentSubreddit();
-    posts.push(...(await getHotPostsFromSubreddit(currentSubreddit.name, 20)));
+    posts.push(...(await getHotPostsFromSubreddit(currentSubreddit.name, 15)));
   } catch (error) {
     console.error('Could not fetch current subreddit posts:', error);
   }
 
-  for (const subredditName of seededSubreddits.slice(0, 6)) {
-    posts.push(...(await getHotPostsFromSubreddit(subredditName, 6)));
+  for (const subredditName of seededSubreddits.slice(0, 8)) {
+    posts.push(...(await getHotPostsFromSubreddit(subredditName, 15)));
   }
 
   return uniquePosts(posts);
@@ -275,7 +281,9 @@ api.get('/world', async (c) => {
       getFeedPosts(),
     ]);
     const groupedPosts = groupPostsByTown(feedPosts);
-    const currentTownPosts = feedPosts.slice(0, 10);
+    const currentSubreddit = await reddit.getCurrentSubreddit();
+    const currentTownPosts =
+      groupedPosts.get(currentSubreddit.name) ?? (await getHotPostsFromSubreddit(currentSubreddit.name, 15));
     const currentTown = await getCurrentSubredditTown(currentTownPosts);
     const towns: WorldTown[] = [currentTown];
 
@@ -289,7 +297,7 @@ api.get('/world', async (c) => {
         id: `feed-${name}`,
         name,
         title: `r/${name}`,
-        posts: posts.slice(0, 10),
+        posts: posts.slice(0, 15),
       });
     }
 
@@ -319,6 +327,32 @@ api.get('/world', async (c) => {
         : 'Reddit data unavailable';
 
     return c.json<WorldResponse>(buildFallbackWorld(message));
+  }
+});
+
+api.get('/subreddit/:subredditName/posts', async (c) => {
+  const subredditName = c.req.param('subredditName');
+  const after = c.req.query('after');
+
+  try {
+    const posts = await getHotPostsFromSubreddit(subredditName, 15, after);
+    const nextAfter = posts.length > 0 ? posts[posts.length - 1]?.id ?? null : null;
+
+    return c.json<SubredditPostsResponse>({
+      type: 'subredditPosts',
+      subredditName,
+      posts,
+      nextAfter,
+    });
+  } catch (error) {
+    console.error(`API Subreddit Posts Error for ${subredditName}:`, error);
+    return c.json<ErrorResponse>(
+      {
+        status: 'error',
+        message: 'Subreddit posts are unavailable',
+      },
+      400
+    );
   }
 });
 

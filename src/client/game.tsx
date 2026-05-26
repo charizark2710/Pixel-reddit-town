@@ -3,8 +3,17 @@ import './index.css';
 import { showToast } from '@devvit/web/client';
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import bigHouseUrl from '../../res/big_house.png';
+import bigTownUrl from '../../res/big_town.png';
+import extraLargeHouseUrl from '../../res/extra_large_house.png';
+import largeHouseUrl from '../../res/large_house.png';
+import mediumHouseUrl from '../../res/medium_house.png';
+import mediumTownUrl from '../../res/medium_town.png';
+import smallHouseUrl from '../../res/small_house.png';
+import smallTownUrl from '../../res/small_town.png';
 import type {
   PostComment,
+  SubredditPostsResponse,
   WorldPost,
   WorldPostDetailResponse,
   WorldTown,
@@ -63,14 +72,52 @@ type PostModalState = {
   error: string | null;
 };
 
+type TownPostPage = {
+  posts: WorldPost[];
+  nextAfter: string | null;
+  loading: boolean;
+  done: boolean;
+};
+
+type MovementBounds = {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+};
+
 const lotWidth = 620;
 const lotHeight = 420;
 const itemsPerLot = 5;
+const townLotColumns = 3;
 const worldColors = ['#e4572e', '#17bebb', '#ffc914', '#76b041', '#845ec2'];
 const grassColor = '#78b85f';
 const darkGrassColor = '#5f9f4e';
 const pathColor = '#c8a96a';
 const fenceColor = '#8a6f48';
+const houseSprites = {
+  small: smallHouseUrl,
+  medium: mediumHouseUrl,
+  large: largeHouseUrl,
+  big: bigHouseUrl,
+  extraLarge: extraLargeHouseUrl,
+};
+const townSprites = {
+  small: smallTownUrl,
+  medium: mediumTownUrl,
+  big: bigTownUrl,
+};
+const spriteUrls = [
+  houseSprites.small,
+  houseSprites.medium,
+  houseSprites.large,
+  houseSprites.big,
+  houseSprites.extraLarge,
+  townSprites.small,
+  townSprites.medium,
+  townSprites.big,
+];
+const spriteImages = new Map<string, HTMLImageElement>();
 
 const lotSlots = [
   { x: -190, y: -105 },
@@ -81,19 +128,19 @@ const lotSlots = [
 ];
 
 const tierToTownSize = (tier: number) => {
-  if (tier >= 50000) return 118;
-  if (tier >= 20000) return 100;
-  if (tier >= 10000) return 84;
-  if (tier >= 1000) return 68;
-  return 54;
+  if (tier >= 50000) return 190;
+  if (tier >= 20000) return 166;
+  if (tier >= 10000) return 146;
+  if (tier >= 1000) return 126;
+  return 108;
 };
 
 const tierToBuildingSize = (tier: number) => {
-  if (tier >= 50000) return { width: 112, height: 142 };
-  if (tier >= 20000) return { width: 92, height: 116 };
-  if (tier >= 10000) return { width: 76, height: 94 };
-  if (tier >= 1000) return { width: 62, height: 76 };
-  return { width: 50, height: 58 };
+  if (tier >= 50000) return { width: 144, height: 144 };
+  if (tier >= 20000) return { width: 124, height: 124 };
+  if (tier >= 10000) return { width: 106, height: 106 };
+  if (tier >= 1000) return { width: 88, height: 88 };
+  return { width: 72, height: 72 };
 };
 
 const hashText = (value: string) => {
@@ -106,6 +153,88 @@ const hashText = (value: string) => {
 
 const getColor = (value: string) => {
   return worldColors[hashText(value) % worldColors.length] ?? '#e4572e';
+};
+
+const getSpriteImage = (url: string) => {
+  const existing = spriteImages.get(url);
+  if (existing) {
+    return existing;
+  }
+
+  const image = new Image();
+  image.src = url;
+  spriteImages.set(url, image);
+  return image;
+};
+
+const getHouseSpriteUrl = (tier: number) => {
+  if (tier >= 50000) return houseSprites.extraLarge;
+  if (tier >= 20000) return houseSprites.big;
+  if (tier >= 10000) return houseSprites.large;
+  if (tier >= 1000) return houseSprites.medium;
+  return houseSprites.small;
+};
+
+const getTownSpriteUrl = (tier: number) => {
+  if (tier >= 50000) return townSprites.big;
+  if (tier >= 10000) return townSprites.medium;
+  return townSprites.small;
+};
+
+const drawSprite = (
+  ctx: CanvasRenderingContext2D,
+  url: string,
+  left: number,
+  top: number,
+  width: number,
+  height: number
+) => {
+  const image = getSpriteImage(url);
+  if (!image.complete || image.naturalWidth === 0) {
+    return false;
+  }
+
+  ctx.drawImage(image, left, top, width, height);
+  return true;
+};
+
+const preloadSprite = async (url: string) => {
+  const image = getSpriteImage(url);
+  if (image.complete && image.naturalWidth > 0) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    image.onload = () => resolve();
+    image.onerror = () => resolve();
+  });
+
+  if (image.decode && image.naturalWidth > 0) {
+    await image.decode().catch(() => undefined);
+  }
+};
+
+const useSpritePreload = () => {
+  const [spritesLoaded, setSpritesLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadSprites = async () => {
+      await Promise.all(spriteUrls.map(preloadSprite));
+      if (!cancelled) {
+        setSpritesLoaded(true);
+      }
+    };
+
+    void loadSprites();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return spritesLoaded;
 };
 
 const normalizeIndex = (index: number, length: number) => {
@@ -122,6 +251,20 @@ const getPostUrl = (post: WorldPost) => {
   }
 
   return `https://www.reddit.com${post.permalink}`;
+};
+
+const mergePosts = (existingPosts: WorldPost[], newPosts: WorldPost[]) => {
+  const seen = new Set(existingPosts.map((post) => post.id));
+  return [
+    ...existingPosts,
+    ...newPosts.filter((post) => {
+      if (seen.has(post.id)) {
+        return false;
+      }
+      seen.add(post.id);
+      return true;
+    }),
+  ];
 };
 
 const getLotKey = (lotX: number, lotY: number) => {
@@ -167,7 +310,21 @@ const getVisibleLots = (player: Vec) => {
   ];
 };
 
-const useKeyboardMovement = (setPlayer: (updater: (player: Vec) => Vec) => void) => {
+const clampToBounds = (player: Vec, bounds: MovementBounds | null) => {
+  if (!bounds) {
+    return player;
+  }
+
+  return {
+    x: Math.max(bounds.minX, Math.min(bounds.maxX, player.x)),
+    y: Math.max(bounds.minY, Math.min(bounds.maxY, player.y)),
+  };
+};
+
+const useKeyboardMovement = (
+  setPlayer: (updater: (player: Vec) => Vec) => void,
+  bounds: MovementBounds | null
+) => {
   const keys = useRef(new Set<string>());
 
   useEffect(() => {
@@ -192,7 +349,7 @@ const useKeyboardMovement = (setPlayer: (updater: (player: Vec) => Vec) => void)
         if (keys.current.has('a') || keys.current.has('arrowleft')) nextX -= speed;
         if (keys.current.has('d') || keys.current.has('arrowright')) nextX += speed;
 
-        return { x: nextX, y: nextY };
+        return clampToBounds({ x: nextX, y: nextY }, bounds);
       });
     }, 33);
 
@@ -201,7 +358,7 @@ const useKeyboardMovement = (setPlayer: (updater: (player: Vec) => Vec) => void)
       window.removeEventListener('keyup', onKeyUp);
       window.clearInterval(timer);
     };
-  }, [setPlayer]);
+  }, [bounds, setPlayer]);
 };
 
 const flattenTownPosts = (towns: WorldTown[]) => {
@@ -250,7 +407,9 @@ const getWorldSourceItems = (towns: WorldTown[]): WorldItem[] => {
 };
 
 const getTownSourceItems = (posts: WorldPost[]): WorldItem[] => {
-  return posts.map((post, index) => makePostItem(post, 0, 0, index % itemsPerLot));
+  return posts
+    .filter((post) => post.isRealPost)
+    .map((post, index) => makePostItem(post, 0, 0, index % itemsPerLot));
 };
 
 const isTownItem = (item: WorldItem): item is DrawableTown => {
@@ -261,41 +420,38 @@ const isPostItem = (item: WorldItem): item is DrawablePost => {
   return item.kind === 'post';
 };
 
-const ensureRecurringCity = (
-  sourceItems: WorldItem[],
-  visibleItems: WorldItem[],
-  player: Vec
-) => {
-  if (visibleItems.some(isTownItem)) {
-    return visibleItems;
-  }
-
-  const townSources = sourceItems.filter(isTownItem);
-  if (townSources.length === 0) {
-    return visibleItems;
-  }
-
-  const playerLot = getPlayerLot(player);
-  const seed = getLotSeed(playerLot.lotX, playerLot.lotY);
-  const town = townSources[normalizeIndex(seed, townSources.length)];
-  const slotIndex = normalizeIndex(seed, itemsPerLot);
-
-  if (!town) {
-    return visibleItems;
-  }
-
-  const recurringTown = makeTownItem(town, playerLot.lotX, playerLot.lotY, slotIndex);
-
-  return [
-    ...visibleItems.filter(
-      (item) =>
-        item.lotKey !== recurringTown.lotKey || item.kind !== 'town'
-    ),
-    recurringTown,
-  ];
+const getCollisionRadius = (item: WorldItem) => {
+  return item.kind === 'town'
+    ? item.size / 2
+    : Math.max(item.width, item.height) / 2;
 };
 
-const materializeVisibleItems = (sourceItems: WorldItem[], player: Vec): WorldItem[] => {
+const collides = (first: WorldItem, second: WorldItem) => {
+  return (
+    first.lotKey === second.lotKey &&
+    distance(first, second) < getCollisionRadius(first) + getCollisionRadius(second) + 24
+  );
+};
+
+const resolveItemCollisions = (items: WorldItem[]) => {
+  const prioritizedItems = [...items].sort((first, second) => {
+    if (first.kind !== second.kind) {
+      return first.kind === 'town' ? -1 : 1;
+    }
+
+    return first.y - second.y;
+  });
+
+  return prioritizedItems.reduce<WorldItem[]>((placedItems, item) => {
+    if (placedItems.some((placedItem) => collides(placedItem, item))) {
+      return placedItems;
+    }
+
+    return [...placedItems, item];
+  }, []);
+};
+
+const materializeWorldItems = (sourceItems: WorldItem[], player: Vec): WorldItem[] => {
   if (sourceItems.length === 0) return [];
 
   const townSources = sourceItems.filter(isTownItem);
@@ -304,7 +460,9 @@ const materializeVisibleItems = (sourceItems: WorldItem[], player: Vec): WorldIt
   const visibleItems = getVisibleLots(player).flatMap(({ lotX, lotY }) => {
     const seed = getLotSeed(lotX, lotY);
     const citySlot = normalizeIndex(seed, itemsPerLot);
-    const shouldShowCity = townSources.length > 0 && normalizeIndex(seed, 5) === 0;
+    const shouldShowCity =
+      townSources.length > 0 &&
+      ((lotX === 0 && lotY === 0) || normalizeIndex(seed, 2) === 0);
 
     return Array.from({ length: itemsPerLot }, (_, slotIndex) => {
       if (shouldShowCity && slotIndex === citySlot) {
@@ -322,7 +480,28 @@ const materializeVisibleItems = (sourceItems: WorldItem[], player: Vec): WorldIt
     }).filter((item) => item !== null);
   });
 
-  return ensureRecurringCity(sourceItems, visibleItems, player);
+  return resolveItemCollisions(visibleItems);
+};
+
+const materializeTownItems = (sourceItems: WorldItem[], player: Vec): WorldItem[] => {
+  const postSources = sourceItems.filter(isPostItem);
+  if (postSources.length === 0) return [];
+
+  const visibleLotKeys = new Set(
+    getVisibleLots(player).map((lot) => getLotKey(lot.lotX, lot.lotY))
+  );
+  const visibleItems = postSources
+    .map((post, index) => {
+      const lotIndex = Math.floor(index / itemsPerLot);
+      const lotX = lotIndex % townLotColumns;
+      const lotY = Math.floor(lotIndex / townLotColumns);
+      const slotIndex = index % itemsPerLot;
+
+      return makePostItem(post, lotX, lotY, slotIndex);
+    })
+    .filter((post) => visibleLotKeys.has(post.lotKey));
+
+  return resolveItemCollisions(visibleItems);
 };
 
 const drawLot = (
@@ -369,45 +548,14 @@ const drawPixelTown = (
   const screenX = town.x - camera.x + canvas.width / 2;
   const screenY = town.y - camera.y + canvas.height / 2;
   const half = town.size / 2;
-  const blockWidth = town.size + 42;
-  const blockHeight = town.size + 26;
-  const left = screenX - blockWidth / 2;
-  const top = screenY - blockHeight / 2;
-  const seed = hashText(town.name);
+  const left = screenX - half;
+  const top = screenY - half;
 
-  ctx.fillStyle = '#43382f';
-  ctx.fillRect(left - 7, top - 7, blockWidth + 14, blockHeight + 14);
-  ctx.fillStyle = '#d6b56d';
-  ctx.fillRect(left, top, blockWidth, blockHeight);
-  ctx.fillStyle = '#7f5f3b';
-  ctx.fillRect(left + 8, screenY - 5, blockWidth - 16, 10);
-  ctx.fillRect(screenX - 5, top + 8, 10, blockHeight - 16);
-
-  const buildingCount = town.tier >= 50000 ? 8 : town.tier >= 10000 ? 6 : 4;
-  for (let index = 0; index < buildingCount; index += 1) {
-    const row = Math.floor(index / 4);
-    const column = index % 4;
-    const buildingWidth = 18 + ((seed + index * 7) % 14);
-    const buildingHeight = 24 + ((seed + index * 11) % 34);
-    const x = left + 18 + column * (blockWidth - 36) / 3 - buildingWidth / 2;
-    const y = top + 18 + row * 52 + (row === 0 ? 0 : 12);
-
-    ctx.fillStyle = index % 2 === 0 ? town.color : '#f7f0d4';
-    ctx.fillRect(x, y, buildingWidth, buildingHeight);
-    ctx.fillStyle = '#2d3142';
-    ctx.fillRect(x - 2, y - 6, buildingWidth + 4, 6);
-    ctx.fillStyle = index % 2 === 0 ? '#f7f0d4' : town.color;
-    for (let windowY = y + 8; windowY < y + buildingHeight - 6; windowY += 12) {
-      ctx.fillRect(x + 6, windowY, 5, 5);
-      if (buildingWidth > 24) {
-        ctx.fillRect(x + buildingWidth - 11, windowY, 5, 5);
-      }
-    }
+  if (!drawSprite(ctx, getTownSpriteUrl(town.tier), left, top, town.size, town.size)) {
+    ctx.fillStyle = town.color;
+    ctx.fillRect(left, top, town.size, town.size);
   }
 
-  ctx.fillStyle = '#2f7d4d';
-  ctx.fillRect(left + 8, top + blockHeight - 16, 12, 12);
-  ctx.fillRect(left + blockWidth - 20, top + blockHeight - 18, 12, 12);
   ctx.fillStyle = '#241f21';
   ctx.font = '16px monospace';
   ctx.textAlign = 'center';
@@ -425,18 +573,11 @@ const drawPixelBuilding = (
   const left = screenX - post.width / 2;
   const top = screenY - post.height / 2;
 
-  ctx.fillStyle = '#463f3a';
-  ctx.fillRect(left - 5, top - 5, post.width + 10, post.height + 10);
-  ctx.fillStyle = post.color;
-  ctx.fillRect(left, top, post.width, post.height);
-  ctx.fillStyle = '#1f2937';
-  ctx.fillRect(left - 6, top - 12, post.width + 12, 12);
-  ctx.fillStyle = '#ffe8a3';
-  for (let y = top + 14; y < top + post.height - 14; y += 22) {
-    for (let x = left + 12; x < left + post.width - 12; x += 20) {
-      ctx.fillRect(x, y, 9, 10);
-    }
+  if (!drawSprite(ctx, getHouseSpriteUrl(post.tier), left, top, post.width, post.height)) {
+    ctx.fillStyle = post.color;
+    ctx.fillRect(left, top, post.width, post.height);
   }
+
   ctx.fillStyle = '#111827';
   ctx.font = '13px monospace';
   ctx.textAlign = 'center';
@@ -502,10 +643,12 @@ const GameCanvas = ({
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    ctx.imageSmoothingEnabled = false;
 
     const resize = () => {
       canvas.width = canvas.clientWidth;
       canvas.height = canvas.clientHeight;
+      ctx.imageSmoothingEnabled = false;
     };
 
     resize();
@@ -516,7 +659,7 @@ const GameCanvas = ({
     const render = () => {
       drawBackground(ctx, player, canvas);
 
-      for (const item of items) {
+      for (const item of [...items].sort((first, second) => first.y - second.y)) {
         if (item.kind === 'town') {
           drawPixelTown(ctx, item, player, canvas);
         } else {
@@ -629,27 +772,54 @@ const PostModal = ({
 
 export const App = () => {
   const { world, loading, error } = useUser();
+  const spritesLoaded = useSpritePreload();
   const [scene, setScene] = useState<Scene>({ mode: 'world', town: null });
   const [player, setPlayer] = useState<Vec>({ x: lotWidth / 2, y: lotHeight / 2 });
   const [postModal, setPostModal] = useState<PostModalState | null>(null);
+  const [townPostPages, setTownPostPages] = useState<Record<string, TownPostPage>>({});
   const worldSourceItems = useMemo(
     () => getWorldSourceItems(world?.towns ?? []),
     [world?.towns]
   );
+  const currentTownPosts = useMemo(() => {
+    if (!scene.town) {
+      return [];
+    }
+
+    return townPostPages[scene.town.name]?.posts ?? scene.town.posts;
+  }, [scene.town, townPostPages]);
   const townSourceItems = useMemo(
-    () => getTownSourceItems(scene.town?.posts ?? []),
-    [scene.town]
+    () => getTownSourceItems(currentTownPosts),
+    [currentTownPosts]
   );
   const sourceItems = scene.mode === 'world' ? worldSourceItems : townSourceItems;
   const activeItems = useMemo(
-    () => materializeVisibleItems(sourceItems, player),
-    [player, sourceItems]
+    () =>
+      scene.mode === 'world'
+        ? materializeWorldItems(sourceItems, player)
+        : materializeTownItems(sourceItems, player),
+    [player, scene.mode, sourceItems]
   );
+  const movementBounds = useMemo<MovementBounds | null>(() => {
+    if (scene.mode === 'world') {
+      return null;
+    }
+
+    const loadedLotCount = Math.max(1, Math.ceil(currentTownPosts.length / itemsPerLot));
+    const loadedRowCount = Math.max(1, Math.ceil(loadedLotCount / townLotColumns));
+
+    return {
+      minX: 40,
+      maxX: townLotColumns * lotWidth - 40,
+      minY: 40,
+      maxY: loadedRowCount * lotHeight - 40,
+    };
+  }, [currentTownPosts.length, scene.mode]);
   const stableSetPlayer = useCallback((updater: (player: Vec) => Vec) => {
     setPlayer(updater);
   }, []);
 
-  useKeyboardMovement(stableSetPlayer);
+  useKeyboardMovement(stableSetPlayer, movementBounds);
 
   const nearby = useMemo(() => {
     return findNearbyTarget(player, activeItems);
@@ -658,6 +828,67 @@ export const App = () => {
   const resetPlayer = useCallback(() => {
     setPlayer({ x: lotWidth / 2, y: lotHeight / 2 });
   }, []);
+
+  const loadMoreTownPosts = useCallback(
+    async (town: WorldTown) => {
+      const page = townPostPages[town.name] ?? {
+        posts: town.posts,
+        nextAfter: town.posts.at(-1)?.id ?? null,
+        loading: false,
+        done: town.posts.length === 0,
+      };
+
+      if (page.loading || page.done) {
+        return;
+      }
+
+      setTownPostPages((prev) => ({
+        ...prev,
+        [town.name]: {
+          ...page,
+          loading: true,
+        },
+      }));
+
+      try {
+        const params = page.nextAfter
+          ? `?after=${encodeURIComponent(page.nextAfter)}`
+          : '';
+        const res = await fetch(
+          `/api/subreddit/${encodeURIComponent(town.name)}/posts${params}`
+        );
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+
+        const data: SubredditPostsResponse = await res.json();
+        setTownPostPages((prev) => {
+          const latest = prev[town.name] ?? page;
+          const posts = mergePosts(latest.posts, data.posts);
+
+          return {
+            ...prev,
+            [town.name]: {
+              posts,
+              nextAfter: data.nextAfter,
+              loading: false,
+              done: data.posts.length === 0 || posts.length === latest.posts.length,
+            },
+          };
+        });
+      } catch {
+        setTownPostPages((prev) => ({
+          ...prev,
+          [town.name]: {
+            ...(prev[town.name] ?? page),
+            loading: false,
+            done: true,
+          },
+        }));
+      }
+    },
+    [townPostPages]
+  );
 
   const openPostModal = useCallback((post: DrawablePost) => {
     if (!post.isRealPost) {
@@ -703,6 +934,15 @@ export const App = () => {
 
     if (nearby.type === 'town') {
       setScene({ mode: 'town', town: nearby.town });
+      setTownPostPages((prev) => ({
+        ...prev,
+        [nearby.town.name]: prev[nearby.town.name] ?? {
+          posts: nearby.town.posts,
+          nextAfter: nearby.town.posts.at(-1)?.id ?? null,
+          loading: false,
+          done: nearby.town.posts.length === 0,
+        },
+      }));
       setPostModal(null);
       resetPlayer();
       return;
@@ -732,10 +972,29 @@ export const App = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [enterNearby, postModal, resetPlayer, scene.mode]);
 
-  if (loading) {
+  useEffect(() => {
+    if (scene.mode !== 'town' || !scene.town) {
+      return;
+    }
+
+    const playerLot = getPlayerLot(player);
+    const lotIndex =
+      Math.max(0, playerLot.lotY) * townLotColumns + Math.max(0, playerLot.lotX);
+    const loadedLotCount = Math.max(1, Math.ceil(currentTownPosts.length / itemsPerLot));
+    const postsNeededForNearbyLots = (lotIndex + 7) * itemsPerLot;
+
+    if (
+      currentTownPosts.length <= postsNeededForNearbyLots ||
+      loadedLotCount - lotIndex <= 3
+    ) {
+      void loadMoreTownPosts(scene.town);
+    }
+  }, [currentTownPosts.length, loadMoreTownPosts, player, scene.mode, scene.town]);
+
+  if (loading || !spritesLoaded) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#78b85f] font-mono text-xl text-slate-900">
-        Loading Scroll Town...
+        {loading ? 'Loading Scroll Town...' : 'Loading pixel art...'}
       </div>
     );
   }
